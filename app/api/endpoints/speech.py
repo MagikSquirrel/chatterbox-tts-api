@@ -11,6 +11,7 @@ import torchaudio as ta
 import base64
 import json
 import struct
+from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from fastapi import APIRouter, HTTPException, status, Form, File, UploadFile
 from fastapi.responses import StreamingResponse
@@ -48,6 +49,82 @@ REQUEST_COUNTER = 0
 
 # Supported audio formats for voice uploads
 SUPPORTED_AUDIO_FORMATS = {".mp3", ".wav", ".flac", ".m4a", ".ogg"}
+
+# Priority labels for model inference scheduling.
+INFERENCE_PRIORITY_HIGH = "high"
+INFERENCE_PRIORITY_BACKGROUND = "background"
+
+
+class InferenceScheduler:
+    """Priority-aware scheduler for model inference slots."""
+
+    def __init__(self, max_concurrent: int):
+        self.max_concurrent = max_concurrent
+        self.active = 0
+        self.high_waiters = 0
+        self.background_waiters = 0
+        self._condition = asyncio.Condition()
+
+    async def acquire(self, priority: str) -> None:
+        is_high = priority != INFERENCE_PRIORITY_BACKGROUND
+
+        async with self._condition:
+            if is_high:
+                self.high_waiters += 1
+            else:
+                self.background_waiters += 1
+
+            waiting = True
+            try:
+                while True:
+                    has_other_high_waiters = self.high_waiters - (1 if is_high else 0) > 0
+                    can_run = self.active < self.max_concurrent and (
+                        is_high or not has_other_high_waiters
+                    )
+
+                    if can_run:
+                        if is_high:
+                            self.high_waiters -= 1
+                        else:
+                            self.background_waiters -= 1
+                        waiting = False
+                        self.active += 1
+                        return
+
+                    await self._condition.wait()
+            except Exception:
+                if waiting:
+                    if is_high:
+                        self.high_waiters -= 1
+                    else:
+                        self.background_waiters -= 1
+                    self._condition.notify_all()
+                raise
+
+    async def release(self) -> None:
+        async with self._condition:
+            if self.active > 0:
+                self.active -= 1
+            self._condition.notify_all()
+
+    @asynccontextmanager
+    async def slot(self, priority: str = INFERENCE_PRIORITY_HIGH):
+        await self.acquire(priority)
+        try:
+            yield
+        finally:
+            await self.release()
+
+
+_inference_scheduler: Optional[InferenceScheduler] = None
+
+
+def get_inference_scheduler() -> InferenceScheduler:
+    """Get the shared inference scheduler (lazy initialized)."""
+    global _inference_scheduler
+    if _inference_scheduler is None:
+        _inference_scheduler = InferenceScheduler(Config.MAX_CONCURRENT_INFERENCES)
+    return _inference_scheduler
 
 
 def create_wav_header(
@@ -173,6 +250,7 @@ async def generate_speech_internal(
     exaggeration: Optional[float] = None,
     cfg_weight: Optional[float] = None,
     temperature: Optional[float] = None,
+    inference_priority: str = INFERENCE_PRIORITY_HIGH,
 ) -> io.BytesIO:
     """Internal function to generate speech with given parameters"""
     global REQUEST_COUNTER
@@ -314,9 +392,10 @@ async def generate_speech_internal(
                     if is_multilingual():
                         generate_kwargs["language_id"] = language_id
 
-                audio_tensor = await loop.run_in_executor(
-                    None, lambda: model.generate(**generate_kwargs)
-                )
+                async with get_inference_scheduler().slot(inference_priority):
+                    audio_tensor = await loop.run_in_executor(
+                        None, lambda: model.generate(**generate_kwargs)
+                    )
 
                 # Ensure tensor is on the correct device and detached
                 if hasattr(audio_tensor, "detach"):
@@ -440,9 +519,10 @@ async def generate_speech_streaming(
     exaggeration: Optional[float] = None,
     cfg_weight: Optional[float] = None,
     temperature: Optional[float] = None,
-    streaming_chunk_size: Optional[int] = None,
-    streaming_strategy: Optional[str] = None,
-    streaming_quality: Optional[str] = None,
+    streaming_chunk_size: Optional[int] = 80,
+    streaming_strategy: Optional[str] = "word",
+    streaming_quality: Optional[str] = "fast",
+    inference_priority: str = INFERENCE_PRIORITY_HIGH,
 ) -> AsyncGenerator[bytes, None]:
     """Streaming function to generate speech with real-time chunk yielding"""
     global REQUEST_COUNTER
@@ -608,10 +688,11 @@ async def generate_speech_streaming(
                     if is_multilingual():
                         generate_kwargs["language_id"] = language_id
 
-                audio_tensor = await loop.run_in_executor(
-                    None,
-                    lambda: model.generate(**generate_kwargs),
-                )
+                async with get_inference_scheduler().slot(inference_priority):
+                    audio_tensor = await loop.run_in_executor(
+                        None,
+                        lambda: model.generate(**generate_kwargs),
+                    )
 
                 # Ensure tensor is on CPU for streaming
                 if hasattr(audio_tensor, "cpu"):
@@ -694,6 +775,7 @@ async def generate_speech_sse(
     streaming_chunk_size: Optional[int] = None,
     streaming_strategy: Optional[str] = None,
     streaming_quality: Optional[str] = None,
+    inference_priority: str = INFERENCE_PRIORITY_HIGH,
 ) -> AsyncGenerator[str, None]:
     """Generate Server-Side Events for speech streaming (OpenAI compatible format)"""
     global REQUEST_COUNTER
@@ -864,10 +946,11 @@ async def generate_speech_sse(
                     if is_multilingual():
                         generate_kwargs["language_id"] = language_id
 
-                audio_tensor = await loop.run_in_executor(
-                    None,
-                    lambda: model.generate(**generate_kwargs),
-                )
+                async with get_inference_scheduler().slot(inference_priority):
+                    audio_tensor = await loop.run_in_executor(
+                        None,
+                        lambda: model.generate(**generate_kwargs),
+                    )
 
                 # Ensure tensor is on CPU for processing
                 if hasattr(audio_tensor, "cpu"):

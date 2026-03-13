@@ -5,6 +5,7 @@ Voice library management for storing and retrieving user-uploaded voices
 import os
 import json
 import hashlib
+import threading
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ class VoiceLibrary:
         self.library_dir = Path(library_dir or Config.VOICE_LIBRARY_DIR)
         self.metadata_file = self.library_dir / "voices.json"
         self.config_file = self.library_dir / "config.json"
+        self._lock = threading.RLock()
         self._ensure_library_dir()
         self._metadata = self._load_metadata()
         self._config = self._load_config()
@@ -90,64 +92,65 @@ class VoiceLibrary:
             ValueError: If voice name is invalid or file format unsupported
             FileExistsError: If voice name already exists
         """
-        # Validate voice name
-        if not voice_name or not voice_name.strip():
-            raise ValueError("Voice name cannot be empty")
-        
-        voice_name = voice_name.strip()
-        
-        # Validate language code
-        if not language or not language.strip():
-            raise ValueError("Language code cannot be empty")
-        
-        language = language.strip().lower()
-        
-        # Check for invalid characters in voice name
-        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
-        if any(char in voice_name for char in invalid_chars):
-            raise ValueError(f"Voice name contains invalid characters: {invalid_chars}")
-        
-        # Get file extension
-        file_ext = Path(original_filename).suffix.lower()
-        if file_ext not in SUPPORTED_VOICE_FORMATS:
-            raise ValueError(f"Unsupported file format: {file_ext}. Supported: {', '.join(SUPPORTED_VOICE_FORMATS)}")
-        
-        # Check if voice name already exists (including aliases)
-        if voice_name in self._metadata["voices"]:
-            raise FileExistsError(f"Voice '{voice_name}' already exists")
-        
-        if self._get_voice_by_alias(voice_name) is not None:
-            raise FileExistsError(f"Name '{voice_name}' is already used as an alias")
-        
-        # Save the voice file with the original extension
-        voice_filename = f"{voice_name}{file_ext}"
-        voice_path = self.library_dir / voice_filename
-        
-        with open(voice_path, 'wb') as f:
-            f.write(file_content)
-        
-        # Generate file hash for deduplication tracking
-        file_hash = self._get_file_hash(voice_path)
-        
-        # Create metadata entry
-        metadata = {
-            "name": voice_name,
-            "filename": voice_filename,
-            "original_filename": original_filename,
-            "file_extension": file_ext,
-            "file_size": len(file_content),
-            "file_hash": file_hash,
-            "upload_date": datetime.now().isoformat(),
-            "path": str(voice_path),
-            "language": language,
-            "aliases": []  # Initialize empty aliases list
-        }
-        
-        # Save metadata
-        self._metadata["voices"][voice_name] = metadata
-        self._save_metadata()
-        
-        return metadata
+        with self._lock:
+            # Validate voice name
+            if not voice_name or not voice_name.strip():
+                raise ValueError("Voice name cannot be empty")
+
+            voice_name = voice_name.strip()
+
+            # Validate language code
+            if not language or not language.strip():
+                raise ValueError("Language code cannot be empty")
+
+            language = language.strip().lower()
+
+            # Check for invalid characters in voice name
+            invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+            if any(char in voice_name for char in invalid_chars):
+                raise ValueError(f"Voice name contains invalid characters: {invalid_chars}")
+
+            # Get file extension
+            file_ext = Path(original_filename).suffix.lower()
+            if file_ext not in SUPPORTED_VOICE_FORMATS:
+                raise ValueError(f"Unsupported file format: {file_ext}. Supported: {', '.join(SUPPORTED_VOICE_FORMATS)}")
+
+            # Check if voice name already exists (including aliases)
+            if voice_name in self._metadata["voices"]:
+                raise FileExistsError(f"Voice '{voice_name}' already exists")
+
+            if self._get_voice_by_alias(voice_name) is not None:
+                raise FileExistsError(f"Name '{voice_name}' is already used as an alias")
+
+            # Save the voice file with the original extension
+            voice_filename = f"{voice_name}{file_ext}"
+            voice_path = self.library_dir / voice_filename
+
+            with open(voice_path, 'wb') as f:
+                f.write(file_content)
+
+            # Generate file hash for deduplication tracking
+            file_hash = self._get_file_hash(voice_path)
+
+            # Create metadata entry
+            metadata = {
+                "name": voice_name,
+                "filename": voice_filename,
+                "original_filename": original_filename,
+                "file_extension": file_ext,
+                "file_size": len(file_content),
+                "file_hash": file_hash,
+                "upload_date": datetime.now().isoformat(),
+                "path": str(voice_path),
+                "language": language,
+                "aliases": []  # Initialize empty aliases list
+            }
+
+            # Save metadata
+            self._metadata["voices"][voice_name] = metadata
+            self._save_metadata()
+
+            return metadata
     
     def get_voice_path(self, voice_name: str) -> Optional[str]:
         """
@@ -159,25 +162,26 @@ class VoiceLibrary:
         Returns:
             Path to the voice file, or None if not found
         """
-        # First try direct name lookup
-        if voice_name in self._metadata["voices"]:
-            metadata = self._metadata["voices"][voice_name]
-            voice_path = Path(metadata["path"])
-            
-            if not voice_path.exists():
-                # File is missing, remove from metadata
-                del self._metadata["voices"][voice_name]
-                self._save_metadata()
-                return None
-            
-            return str(voice_path)
-        
-        # Then try alias lookup
-        actual_name = self._get_voice_by_alias(voice_name)
-        if actual_name:
-            return self.get_voice_path(actual_name)
-        
-        return None
+        with self._lock:
+            # First try direct name lookup
+            if voice_name in self._metadata["voices"]:
+                metadata = self._metadata["voices"][voice_name]
+                voice_path = Path(metadata["path"])
+
+                if not voice_path.exists():
+                    # File is missing, remove from metadata
+                    del self._metadata["voices"][voice_name]
+                    self._save_metadata()
+                    return None
+
+                return str(voice_path)
+
+            # Then try alias lookup
+            actual_name = self._get_voice_by_alias(voice_name)
+            if actual_name:
+                return self.get_voice_path(actual_name)
+
+            return None
     
     def list_voices(self) -> List[Dict]:
         """
@@ -186,34 +190,35 @@ class VoiceLibrary:
         Returns:
             List of voice metadata dictionaries
         """
-        voices = []
-        voices_to_remove = []
-        
-        for voice_name, metadata in self._metadata["voices"].items():
-            voice_path = Path(metadata["path"])
-            if voice_path.exists():
-                # Ensure aliases and language fields exist for backward compatibility
-                voice_data = {
-                    **metadata,
-                    "exists": True,
-                    "aliases": metadata.get("aliases", []),
-                    "language": metadata.get("language", "en")  # Default to English for old voices
-                }
-                voices.append(voice_data)
-            else:
-                # Mark for removal if file is missing
-                voices_to_remove.append(voice_name)
-        
-        # Clean up missing files from metadata
-        for voice_name in voices_to_remove:
-            del self._metadata["voices"][voice_name]
-        
-        if voices_to_remove:
-            self._save_metadata()
-        
-        # Sort by upload date (newest first)
-        voices.sort(key=lambda x: x["upload_date"], reverse=True)
-        return voices
+        with self._lock:
+            voices = []
+            voices_to_remove = []
+
+            for voice_name, metadata in self._metadata["voices"].items():
+                voice_path = Path(metadata["path"])
+                if voice_path.exists():
+                    # Ensure aliases and language fields exist for backward compatibility
+                    voice_data = {
+                        **metadata,
+                        "exists": True,
+                        "aliases": metadata.get("aliases", []),
+                        "language": metadata.get("language", "en")  # Default to English for old voices
+                    }
+                    voices.append(voice_data)
+                else:
+                    # Mark for removal if file is missing
+                    voices_to_remove.append(voice_name)
+
+            # Clean up missing files from metadata
+            for voice_name in voices_to_remove:
+                del self._metadata["voices"][voice_name]
+
+            if voices_to_remove:
+                self._save_metadata()
+
+            # Sort by upload date (newest first)
+            voices.sort(key=lambda x: x["upload_date"], reverse=True)
+            return voices
     
     def delete_voice(self, voice_name: str) -> bool:
         """
@@ -225,24 +230,25 @@ class VoiceLibrary:
         Returns:
             True if voice was deleted, False if not found
         """
-        if voice_name not in self._metadata["voices"]:
-            return False
-        
-        metadata = self._metadata["voices"][voice_name]
-        voice_path = Path(metadata["path"])
-        
-        # Remove file if it exists
-        if voice_path.exists():
-            try:
-                voice_path.unlink()
-            except OSError:
-                pass  # File might be in use, but we'll remove from metadata anyway
-        
-        # Remove from metadata
-        del self._metadata["voices"][voice_name]
-        self._save_metadata()
-        
-        return True
+        with self._lock:
+            if voice_name not in self._metadata["voices"]:
+                return False
+
+            metadata = self._metadata["voices"][voice_name]
+            voice_path = Path(metadata["path"])
+
+            # Remove file if it exists
+            if voice_path.exists():
+                try:
+                    voice_path.unlink()
+                except OSError:
+                    pass  # File might be in use, but we'll remove from metadata anyway
+
+            # Remove from metadata
+            del self._metadata["voices"][voice_name]
+            self._save_metadata()
+
+            return True
     
     def rename_voice(self, old_name: str, new_name: str) -> bool:
         """
@@ -259,51 +265,52 @@ class VoiceLibrary:
             ValueError: If new name is invalid
             FileExistsError: If new name already exists
         """
-        if old_name not in self._metadata["voices"]:
-            return False
-        
-        # Validate new name
-        if not new_name or not new_name.strip():
-            raise ValueError("Voice name cannot be empty")
-        
-        new_name = new_name.strip()
-        
-        # Check for invalid characters
-        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
-        if any(char in new_name for char in invalid_chars):
-            raise ValueError(f"Voice name contains invalid characters: {invalid_chars}")
-        
-        # Check if new name already exists
-        if new_name in self._metadata["voices"]:
-            raise FileExistsError(f"Voice '{new_name}' already exists")
-        
-        # Get existing metadata
-        metadata = self._metadata["voices"][old_name].copy()
-        old_path = Path(metadata["path"])
-        
-        # Create new filename and path
-        file_ext = metadata["file_extension"]
-        new_filename = f"{new_name}{file_ext}"
-        new_path = self.library_dir / new_filename
-        
-        # Rename the file if it exists
-        if old_path.exists():
-            try:
-                old_path.rename(new_path)
-            except OSError as e:
-                raise ValueError(f"Failed to rename voice file: {e}")
-        
-        # Update metadata
-        metadata["name"] = new_name
-        metadata["filename"] = new_filename
-        metadata["path"] = str(new_path)
-        
-        # Save under new name and remove old
-        self._metadata["voices"][new_name] = metadata
-        del self._metadata["voices"][old_name]
-        self._save_metadata()
-        
-        return True
+        with self._lock:
+            if old_name not in self._metadata["voices"]:
+                return False
+
+            # Validate new name
+            if not new_name or not new_name.strip():
+                raise ValueError("Voice name cannot be empty")
+
+            new_name = new_name.strip()
+
+            # Check for invalid characters
+            invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+            if any(char in new_name for char in invalid_chars):
+                raise ValueError(f"Voice name contains invalid characters: {invalid_chars}")
+
+            # Check if new name already exists
+            if new_name in self._metadata["voices"]:
+                raise FileExistsError(f"Voice '{new_name}' already exists")
+
+            # Get existing metadata
+            metadata = self._metadata["voices"][old_name].copy()
+            old_path = Path(metadata["path"])
+
+            # Create new filename and path
+            file_ext = metadata["file_extension"]
+            new_filename = f"{new_name}{file_ext}"
+            new_path = self.library_dir / new_filename
+
+            # Rename the file if it exists
+            if old_path.exists():
+                try:
+                    old_path.rename(new_path)
+                except OSError as e:
+                    raise ValueError(f"Failed to rename voice file: {e}")
+
+            # Update metadata
+            metadata["name"] = new_name
+            metadata["filename"] = new_filename
+            metadata["path"] = str(new_path)
+
+            # Save under new name and remove old
+            self._metadata["voices"][new_name] = metadata
+            del self._metadata["voices"][old_name]
+            self._save_metadata()
+
+            return True
     
     def get_voice_info(self, voice_name: str) -> Optional[Dict]:
         """
@@ -315,25 +322,26 @@ class VoiceLibrary:
         Returns:
             Voice metadata dictionary, or None if not found
         """
-        # Resolve alias to actual name
-        actual_name = self.resolve_voice_name(voice_name)
-        if actual_name is None:
-            return None
-        
-        metadata = self._metadata["voices"][actual_name]
-        voice_path = Path(metadata["path"])
-        
-        if not voice_path.exists():
-            # File is missing, remove from metadata
-            del self._metadata["voices"][actual_name]
-            self._save_metadata()
-            return None
-        
-        return {
-            **metadata,
-            "exists": True,
-            "aliases": metadata.get("aliases", [])
-        }
+        with self._lock:
+            # Resolve alias to actual name
+            actual_name = self.resolve_voice_name(voice_name)
+            if actual_name is None:
+                return None
+
+            metadata = self._metadata["voices"][actual_name]
+            voice_path = Path(metadata["path"])
+
+            if not voice_path.exists():
+                # File is missing, remove from metadata
+                del self._metadata["voices"][actual_name]
+                self._save_metadata()
+                return None
+
+            return {
+                **metadata,
+                "exists": True,
+                "aliases": metadata.get("aliases", [])
+            }
     
     def cleanup_missing_files(self) -> List[str]:
         """
@@ -342,18 +350,19 @@ class VoiceLibrary:
         Returns:
             List of removed voice names
         """
-        removed_voices = []
-        
-        for voice_name, metadata in list(self._metadata["voices"].items()):
-            voice_path = Path(metadata["path"])
-            if not voice_path.exists():
-                del self._metadata["voices"][voice_name]
-                removed_voices.append(voice_name)
-        
-        if removed_voices:
-            self._save_metadata()
-        
-        return removed_voices
+        with self._lock:
+            removed_voices = []
+
+            for voice_name, metadata in list(self._metadata["voices"].items()):
+                voice_path = Path(metadata["path"])
+                if not voice_path.exists():
+                    del self._metadata["voices"][voice_name]
+                    removed_voices.append(voice_name)
+
+            if removed_voices:
+                self._save_metadata()
+
+            return removed_voices
     
     def set_default_voice(self, voice_name: str) -> bool:
         """
@@ -365,31 +374,33 @@ class VoiceLibrary:
         Returns:
             True if successful, False if voice not found
         """
-        voice_path = self.get_voice_path(voice_name)
-        if voice_path is None:
-            return False
-        
-        self._config["default_voice"] = voice_name
-        self._config["default_voice_path"] = voice_path
-        self._save_config()
-        
-        # Also update the runtime configuration
-        Config.VOICE_SAMPLE_PATH = voice_path
-        
-        return True
+        with self._lock:
+            voice_path = self.get_voice_path(voice_name)
+            if voice_path is None:
+                return False
+
+            self._config["default_voice"] = voice_name
+            self._config["default_voice_path"] = voice_path
+            self._save_config()
+
+            # Also update the runtime configuration
+            Config.VOICE_SAMPLE_PATH = voice_path
+
+            return True
     
     def clear_default_voice(self):
         """
         Clear the default voice setting (revert to system default)
         """
-        original_path = os.getenv('VOICE_SAMPLE_PATH', './voice-sample.mp3')
-        
-        self._config["default_voice"] = None
-        self._config["default_voice_path"] = None
-        self._save_config()
-        
-        # Also update the runtime configuration
-        Config.VOICE_SAMPLE_PATH = original_path
+        with self._lock:
+            original_path = os.getenv('VOICE_SAMPLE_PATH', './voice-sample.mp3')
+
+            self._config["default_voice"] = None
+            self._config["default_voice_path"] = None
+            self._save_config()
+
+            # Also update the runtime configuration
+            Config.VOICE_SAMPLE_PATH = original_path
     
     def get_default_voice(self) -> Optional[str]:
         """
@@ -398,7 +409,8 @@ class VoiceLibrary:
         Returns:
             Default voice name or None if using system default
         """
-        return self._config.get("default_voice")
+        with self._lock:
+            return self._config.get("default_voice")
     
     def get_default_voice_path(self) -> Optional[str]:
         """
@@ -407,19 +419,21 @@ class VoiceLibrary:
         Returns:
             Default voice path or None if using system default
         """
-        # Check if we have a persistent default voice set
-        if self._config.get("default_voice_path") and Path(self._config["default_voice_path"]).exists():
-            return self._config["default_voice_path"]
-        return None
+        with self._lock:
+            # Check if we have a persistent default voice set
+            if self._config.get("default_voice_path") and Path(self._config["default_voice_path"]).exists():
+                return self._config["default_voice_path"]
+            return None
     
     def initialize_default_voice(self):
         """
         Initialize the default voice from persistent configuration on startup
         """
-        # If we have a persistent default voice setting, apply it
-        persistent_path = self.get_default_voice_path()
-        if persistent_path:
-            Config.VOICE_SAMPLE_PATH = persistent_path
+        with self._lock:
+            # If we have a persistent default voice setting, apply it
+            persistent_path = self.get_default_voice_path()
+            if persistent_path:
+                Config.VOICE_SAMPLE_PATH = persistent_path
     
     def _get_voice_by_alias(self, alias: str) -> Optional[str]:
         """
@@ -431,11 +445,12 @@ class VoiceLibrary:
         Returns:
             The actual voice name, or None if alias not found
         """
-        for voice_name, metadata in self._metadata["voices"].items():
-            aliases = metadata.get("aliases", [])
-            if alias in aliases:
-                return voice_name
-        return None
+        with self._lock:
+            for voice_name, metadata in self._metadata["voices"].items():
+                aliases = metadata.get("aliases", [])
+                if alias in aliases:
+                    return voice_name
+            return None
     
     def add_alias(self, voice_name: str, alias: str) -> bool:
         """
@@ -452,41 +467,42 @@ class VoiceLibrary:
             ValueError: If alias is invalid
             FileExistsError: If alias already exists
         """
-        if voice_name not in self._metadata["voices"]:
-            return False
-        
-        # Validate alias
-        if not alias or not alias.strip():
-            raise ValueError("Alias cannot be empty")
-        
-        alias = alias.strip()
-        
-        # Check for invalid characters
-        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
-        if any(char in alias for char in invalid_chars):
-            raise ValueError(f"Alias contains invalid characters: {invalid_chars}")
-        
-        # Check if alias already exists as a voice name
-        if alias in self._metadata["voices"]:
-            raise FileExistsError(f"Alias '{alias}' conflicts with existing voice name")
-        
-        # Check if alias already exists as another alias
-        existing_voice = self._get_voice_by_alias(alias)
-        if existing_voice is not None:
-            if existing_voice == voice_name:
-                # Alias already exists for this voice
-                return True
-            else:
-                raise FileExistsError(f"Alias '{alias}' already exists for voice '{existing_voice}'")
-        
-        # Add the alias
-        aliases = self._metadata["voices"][voice_name].get("aliases", [])
-        if alias not in aliases:
-            aliases.append(alias)
-            self._metadata["voices"][voice_name]["aliases"] = aliases
-            self._save_metadata()
-        
-        return True
+        with self._lock:
+            if voice_name not in self._metadata["voices"]:
+                return False
+
+            # Validate alias
+            if not alias or not alias.strip():
+                raise ValueError("Alias cannot be empty")
+
+            alias = alias.strip()
+
+            # Check for invalid characters
+            invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+            if any(char in alias for char in invalid_chars):
+                raise ValueError(f"Alias contains invalid characters: {invalid_chars}")
+
+            # Check if alias already exists as a voice name
+            if alias in self._metadata["voices"]:
+                raise FileExistsError(f"Alias '{alias}' conflicts with existing voice name")
+
+            # Check if alias already exists as another alias
+            existing_voice = self._get_voice_by_alias(alias)
+            if existing_voice is not None:
+                if existing_voice == voice_name:
+                    # Alias already exists for this voice
+                    return True
+                else:
+                    raise FileExistsError(f"Alias '{alias}' already exists for voice '{existing_voice}'")
+
+            # Add the alias
+            aliases = self._metadata["voices"][voice_name].get("aliases", [])
+            if alias not in aliases:
+                aliases.append(alias)
+                self._metadata["voices"][voice_name]["aliases"] = aliases
+                self._save_metadata()
+
+            return True
     
     def remove_alias(self, voice_name: str, alias: str) -> bool:
         """
@@ -499,17 +515,18 @@ class VoiceLibrary:
         Returns:
             True if alias was removed, False if voice or alias not found
         """
-        if voice_name not in self._metadata["voices"]:
+        with self._lock:
+            if voice_name not in self._metadata["voices"]:
+                return False
+
+            aliases = self._metadata["voices"][voice_name].get("aliases", [])
+            if alias in aliases:
+                aliases.remove(alias)
+                self._metadata["voices"][voice_name]["aliases"] = aliases
+                self._save_metadata()
+                return True
+
             return False
-        
-        aliases = self._metadata["voices"][voice_name].get("aliases", [])
-        if alias in aliases:
-            aliases.remove(alias)
-            self._metadata["voices"][voice_name]["aliases"] = aliases
-            self._save_metadata()
-            return True
-        
-        return False
     
     def list_aliases(self, voice_name: str) -> List[str]:
         """
@@ -521,10 +538,11 @@ class VoiceLibrary:
         Returns:
             List of aliases
         """
-        if voice_name not in self._metadata["voices"]:
-            return []
-        
-        return self._metadata["voices"][voice_name].get("aliases", [])
+        with self._lock:
+            if voice_name not in self._metadata["voices"]:
+                return []
+
+            return self._metadata["voices"][voice_name].get("aliases", [])
     
     def get_all_voice_names(self) -> List[str]:
         """
@@ -533,14 +551,15 @@ class VoiceLibrary:
         Returns:
             List of all available voice names (actual names + aliases)
         """
-        names = list(self._metadata["voices"].keys())
-        
-        # Add all aliases
-        for metadata in self._metadata["voices"].values():
-            aliases = metadata.get("aliases", [])
-            names.extend(aliases)
-        
-        return names
+        with self._lock:
+            names = list(self._metadata["voices"].keys())
+
+            # Add all aliases
+            for metadata in self._metadata["voices"].values():
+                aliases = metadata.get("aliases", [])
+                names.extend(aliases)
+
+            return names
     
     def resolve_voice_name(self, name_or_alias: str) -> Optional[str]:
         """
@@ -552,12 +571,13 @@ class VoiceLibrary:
         Returns:
             The actual voice name, or None if not found
         """
-        # First check if it's an actual voice name
-        if name_or_alias in self._metadata["voices"]:
-            return name_or_alias
-        
-        # Then check if it's an alias
-        return self._get_voice_by_alias(name_or_alias)
+        with self._lock:
+            # First check if it's an actual voice name
+            if name_or_alias in self._metadata["voices"]:
+                return name_or_alias
+
+            # Then check if it's an alias
+            return self._get_voice_by_alias(name_or_alias)
     
     def get_voice_language(self, voice_name: str) -> Optional[str]:
         """
@@ -569,13 +589,14 @@ class VoiceLibrary:
         Returns:
             Language code, or None if voice not found
         """
-        # Resolve alias to actual name
-        actual_name = self.resolve_voice_name(voice_name)
-        if actual_name is None:
-            return None
-        
-        metadata = self._metadata["voices"][actual_name]
-        return metadata.get("language", "en")  # Default to English for backward compatibility
+        with self._lock:
+            # Resolve alias to actual name
+            actual_name = self.resolve_voice_name(voice_name)
+            if actual_name is None:
+                return None
+
+            metadata = self._metadata["voices"][actual_name]
+            return metadata.get("language", "en")  # Default to English for backward compatibility
 
 
 # Global voice library instance

@@ -53,6 +53,7 @@ class Config:
     LONG_TEXT_SILENCE_PADDING_MS = int(os.getenv("LONG_TEXT_SILENCE_PADDING_MS", 200))
     LONG_TEXT_JOB_RETENTION_DAYS = int(os.getenv("LONG_TEXT_JOB_RETENTION_DAYS", 7))
     LONG_TEXT_MAX_CONCURRENT_JOBS = int(os.getenv("LONG_TEXT_MAX_CONCURRENT_JOBS", 3))
+    MAX_CONCURRENT_INFERENCES = int(os.getenv("MAX_CONCURRENT_INFERENCES", 1))
 
     TTS_MODEL_TYPE = _resolve_model_type()
     USE_MULTILINGUAL_MODEL = TTS_MODEL_TYPE == "multilingual"
@@ -118,6 +119,10 @@ class Config:
         if cls.LONG_TEXT_MAX_CONCURRENT_JOBS <= 0:
             raise ValueError(
                 f"LONG_TEXT_MAX_CONCURRENT_JOBS must be positive, got {cls.LONG_TEXT_MAX_CONCURRENT_JOBS}"
+            )
+        if cls.MAX_CONCURRENT_INFERENCES <= 0:
+            raise ValueError(
+                f"MAX_CONCURRENT_INFERENCES must be positive, got {cls.MAX_CONCURRENT_INFERENCES}"
             )
         if cls.TTS_MODEL_TYPE not in ("standard", "multilingual", "turbo"):
             raise ValueError(

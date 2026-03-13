@@ -14,7 +14,11 @@ from app.config import Config
 from app.core.long_text_jobs import get_job_manager
 from app.core.text_processing import split_text_for_long_generation, estimate_processing_time
 from app.core.audio_processing import concatenate_audio_files, AudioConcatenationError
-from app.api.endpoints.speech import generate_speech_internal, resolve_voice_path_and_language
+from app.api.endpoints.speech import (
+    generate_speech_internal,
+    resolve_voice_path_and_language,
+    INFERENCE_PRIORITY_BACKGROUND,
+)
 from app.models.long_text import (
     LongTextJobStatus,
     LongTextJobMetadata,
@@ -191,7 +195,8 @@ class LongTextProcessor:
                         language_id=language_id,
                         exaggeration=metadata.parameters.get('exaggeration'),
                         cfg_weight=metadata.parameters.get('cfg_weight'),
-                        temperature=metadata.parameters.get('temperature')
+                        temperature=metadata.parameters.get('temperature'),
+                        inference_priority=INFERENCE_PRIORITY_BACKGROUND,
                     )
 
                     # Save chunk audio file
