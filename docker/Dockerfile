@@ -30,8 +30,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir fastapi uvicorn[standard] python-dotenv python-multipart requests psutil pydub sse-starlette
 
-# Install chatterbox-tts — with the breaking fix (pkuseg package exclusion) 
-RUN pip install git+https://github.com/travisvn/chatterbox-multilingual.git@exp
+# Install chatterbox-tts with Turbo and Multilingual support (spacy-pkuseg made optional)
+RUN pip install git+https://github.com/jimihford/chatterbox.git@spacy-pkuseg-optional
 
 # Copy application code
 COPY app/ ./app/
@@ -63,6 +63,7 @@ ENV LONG_TEXT_CHUNK_SIZE=2500
 ENV LONG_TEXT_SILENCE_PADDING_MS=200
 ENV LONG_TEXT_JOB_RETENTION_DAYS=7
 ENV LONG_TEXT_MAX_CONCURRENT_JOBS=3
+ENV MAX_CONCURRENT_INFERENCES=1
 
 # Expose port
 EXPOSE ${PORT}
